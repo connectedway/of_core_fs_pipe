@@ -370,6 +370,7 @@ static OFC_BOOL OfcFSPipeCloseHandle (OFC_HANDLE hFile)
 	}
       ofc_waitq_destroy(half->hWaitQ);
       half->hWaitQ = OFC_HANDLE_NULL;
+      half->hPipe = OFC_HANDLE_NULL;
 
       if (half->sibling != OFC_NULL)
 	{
@@ -826,7 +827,8 @@ OFC_VOID OfcFSPipeShutdown (OFC_VOID)
 	  client = pipe_file->client ;
 	  if (client->hPipe != OFC_HANDLE_NULL)
 	    {
-	      OfcCloseHandle(client->hPipe);
+	      OfcFSPipeCloseHandle(client->hPipe);
+	      client->hPipe = OFC_HANDLE_NULL;
 	    }
 	}
       if (pipe_file->server != OFC_NULL)
@@ -835,7 +837,8 @@ OFC_VOID OfcFSPipeShutdown (OFC_VOID)
 	  server = pipe_file->server ;
 	  if (server->hPipe != OFC_HANDLE_NULL)
 	    {
-	      OfcCloseHandle(server->hPipe);
+	      OfcFSPipeCloseHandle(server->hPipe);
+	      server->hPipe = OFC_HANDLE_NULL;
 	    }
 	}
       ofc_lock(pipes.lock);
