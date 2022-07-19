@@ -524,6 +524,17 @@ OFC_BOOL OfcFSPipeGetFileInformationByHandleEx
 	    ret = OFC_TRUE ;
 	  }
 	  break ;
+
+        case OfcFileEaInfo:
+          if (dwBufferSize >= sizeof(OFC_FILE_EA_INFO))
+            {
+              OFC_FILE_EA_INFO *lpFileEaInfo =
+                (OFC_FILE_EA_INFO *) lpFileInformation;
+              lpFileEaInfo->EaSize = 0;
+              ret = OFC_TRUE;
+            }
+          break;
+
 	default:
 	  ofc_thread_set_variable (OfcLastError, 
 				 (OFC_DWORD_PTR) 
