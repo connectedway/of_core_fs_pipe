@@ -814,7 +814,7 @@ OFC_VOID OfcFSPipeStartup (OFC_VOID)
    */
   path = ofc_path_createW(TSTR("/")) ;
   if (path == OFC_NULL)
-    ofc_printf ("Couldn't Create IPC Path\n") ;
+    ofc_log (OFC_LOG_WARN, "Couldn't Create IPC Path\n") ;
   else
     ofc_path_add_mapW(TSTR("IPC"), TSTR("IPC Path"), path, OFC_FST_PIPE,
 		     OFC_TRUE) ;
