@@ -368,11 +368,15 @@ static OFC_BOOL OfcFSPipeCloseHandle (OFC_HANDLE hFile)
 	{
 	  ofc_free (data) ;
 	}
+      if (half->sibling == OFC_HANDLE_NULL)
+        half->sibling = OFC_INVALID_HANDLE_VALUE;
+      ofc_waitq_wake(half->hWaitQ);
       ofc_waitq_destroy(half->hWaitQ);
       half->hWaitQ = OFC_HANDLE_NULL;
       half->hPipe = OFC_HANDLE_NULL;
 
-      if (half->sibling != OFC_NULL)
+      if (half->sibling != OFC_NULL &&
+          half->sibling != OFC_INVALID_HANDLE_VALUE)
 	{
 	  sibling = half->sibling ;
 	  sibling->sibling = OFC_NULL ;
