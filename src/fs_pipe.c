@@ -166,7 +166,8 @@ static OFC_HANDLE OfcFSPipeCreateFile (OFC_LPCTSTR lpFileName,
 	      pipe_enqueue_internal (pipe_file) ;
 	      ofc_pipe_unlock() ;
 
-	      while (server->sibling == OFC_NULL)
+	      while (server->sibling == OFC_NULL  &&
+                     server->hWaitQ != OFC_NULL)
 		{
 		  ofc_waitq_block(server->hWaitQ);
 		}
