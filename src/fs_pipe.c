@@ -5,9 +5,12 @@
  */
 #include "ofc/types.h"
 #include "ofc/handle.h"
+#include "ofc/event.h"
 #include "ofc/libc.h"
 #include "ofc/path.h"
 #include "ofc/waitq.h"
+#include "ofc/queue.h"
+#include "ofc/process.h"
 #include "ofc/thread.h"
 #include "ofc/lock.h"
 #include "ofc/heap.h"
@@ -43,6 +46,7 @@ typedef struct _OFC_FS_PIPE_HALF
 {
   OFC_HANDLE hPipe ;
   OFC_HANDLE hWaitQ;
+  OFC_HANDLE overlapped_queue;
   OFC_FS_PIPE_FILE *pipe_file;
   struct _OFC_FS_PIPE_HALF *sibling ;
 } OFC_FS_PIPE_HALF ;
@@ -55,6 +59,49 @@ typedef struct
 } OFC_PIPES ;
 
 OFC_PIPES pipes;
+
+typedef struct {
+    OFC_HANDLE hEvent;
+    OFC_INT dwResult;
+    OFC_LPVOID lpBuffer;
+    OFC_DWORD nNumberOfBytes;
+} OFC_FSPIPE_OVERLAPPED;
+
+static OFC_VOID OfcFSPipeDestroyOverlapped (OFC_HANDLE hOverlapped);
+
+static OFC_VOID service_overlapped_queue (OFC_FS_PIPE_HALF *half)
+{
+  OFC_INT nBytes ;
+  OFC_FS_PIPE_DATA *data ;
+  OFC_HANDLE hOverlapped;
+  OFC_FSPIPE_OVERLAPPED *Overlapped;
+
+  if (!ofc_waitq_empty(half->hWaitQ))
+    {
+      hOverlapped = (OFC_HANDLE) ofc_dequeue(half->overlapped_queue);
+      if (hOverlapped != OFC_HANDLE_NULL)
+	{
+	  Overlapped = ofc_handle_lock(hOverlapped);
+	  ofc_assert (Overlapped != OFC_NULL, "Overlapped handle should lock");
+
+	  data = ofc_waitq_first(half->hWaitQ) ;
+	  nBytes = OFC_MIN (Overlapped->nNumberOfBytes, data->len);
+
+	  ofc_memcpy (Overlapped->lpBuffer, data->buffer + data->offset,
+		      nBytes) ;
+	  Overlapped->dwResult = nBytes;
+
+	  data->len -= nBytes ;
+	  data->offset += nBytes ;
+	  if (data->len == 0)
+	    {
+	      ofc_waitq_dequeue(half->hWaitQ);
+	      ofc_free (data) ;
+	    }
+	  ofc_event_set(Overlapped->hEvent);
+	}
+    }
+}
 
 OFC_VOID ofc_pipe_lock (OFC_VOID)
 {
@@ -154,7 +201,7 @@ static OFC_HANDLE OfcFSPipeCreateFile (OFC_LPCTSTR lpFileName,
 	  if (server != OFC_NULL)
 	    {
 	      server->hWaitQ = ofc_waitq_create();
-
+	      server->overlapped_queue = ofc_queue_create();
 	      server->hPipe = ofc_handle_create (OFC_HANDLE_PIPE, server) ;
 	      server->pipe_file = pipe_file ;
 	      server->sibling = OFC_NULL;
@@ -166,6 +213,7 @@ static OFC_HANDLE OfcFSPipeCreateFile (OFC_LPCTSTR lpFileName,
 	      pipe_enqueue_internal (pipe_file) ;
 	      ofc_pipe_unlock() ;
 
+	      ofc_waitq_reset(server->hWaitQ);
 	      while (server->sibling == OFC_NULL  &&
                      server->hWaitQ != OFC_HANDLE_NULL)
 		{
@@ -218,6 +266,7 @@ static OFC_HANDLE OfcFSPipeCreateFile (OFC_LPCTSTR lpFileName,
 	      server = pipe_file->server ;
 
 	      client->hWaitQ = ofc_waitq_create();
+	      client->overlapped_queue = ofc_queue_create();
 	      client->hPipe = ofc_handle_create (OFC_HANDLE_PIPE, client) ;
 	      client->pipe_file = pipe_file ;
 	      client->sibling = pipe_file->server ;
@@ -276,8 +325,8 @@ static OFC_BOOL OfcFSPipeWriteFile (OFC_HANDLE hFile,
 	  data->len = nNumberOfBytesToWrite ;
 	  data->offset = 0 ;
 	  ofc_memcpy (data->buffer, lpBuffer, nNumberOfBytesToWrite) ;
-
 	  ofc_waitq_enqueue(sibling->hWaitQ, data);
+	  service_overlapped_queue(sibling);
 
 	  if (lpNumberOfBytesWritten != OFC_NULL)
 	    *lpNumberOfBytesWritten = nNumberOfBytesToWrite ;
@@ -305,44 +354,65 @@ static OFC_BOOL OfcFSPipeReadFile (OFC_HANDLE hFile,
   OFC_FS_PIPE_HALF *half ;
   OFC_FS_PIPE_DATA *data ;
   OFC_INT nBytes ;
+  OFC_FSPIPE_OVERLAPPED *Overlapped;
 
   ret = OFC_FALSE ;
 
   half = ofc_handle_lock (hFile) ;
   if (half != OFC_NULL)
     {
+      ofc_waitq_reset(half->hWaitQ);
       ofc_pipe_lock() ;
 
-      for (data = ofc_waitq_first(half->hWaitQ) ;
-	   data == OFC_NULL && half->sibling != OFC_NULL ;
-	   data = ofc_waitq_first(half->hWaitQ))
-	{
-	  ofc_pipe_unlock() ;
-	  ofc_waitq_block(half->hWaitQ);
-	  ofc_pipe_lock() ;
-	}
+      Overlapped = OFC_NULL;
+      if (hOverlapped != OFC_HANDLE_NULL)
+	Overlapped = ofc_handle_lock(hOverlapped);
 
-      if (data == OFC_NULL)
+      if (Overlapped != OFC_NULL)
 	{
+	  Overlapped->lpBuffer = lpBuffer;
+	  Overlapped->nNumberOfBytes = nNumberOfBytesToRead;
+	  ofc_event_reset(Overlapped->hEvent);
+
+	  ofc_enqueue (half->overlapped_queue, (OFC_VOID *) hOverlapped);
 	  ofc_thread_set_variable (OfcLastError, 
-				 (OFC_DWORD_PTR) OFC_ERROR_BROKEN_PIPE) ;
+				   (OFC_DWORD_PTR) OFC_ERROR_IO_PENDING) ;
+	  ofc_handle_unlock(hOverlapped);
+	  service_overlapped_queue(half);
 	}
       else
 	{
-	  nBytes = OFC_MIN(nNumberOfBytesToRead, data->len) ;
-	  ofc_memcpy (lpBuffer, data->buffer + data->offset, nBytes) ;
-	  if (lpNumberOfBytesRead != OFC_NULL)
-	    *lpNumberOfBytesRead = nBytes ;
-	  data->len -= nBytes ;
-	  data->offset += nBytes ;
-	  if (data->len == 0)
+	  for (data = ofc_waitq_first(half->hWaitQ) ;
+	       data == OFC_NULL && half->sibling != OFC_NULL ;
+	       data = ofc_waitq_first(half->hWaitQ))
 	    {
-	      ofc_waitq_dequeue(half->hWaitQ);
-	      ofc_free (data) ;
+	      ofc_pipe_unlock() ;
+	      ofc_waitq_block(half->hWaitQ);
+	      ofc_pipe_lock() ;
 	    }
-	  ret = OFC_TRUE ;
+
+	  if (data == OFC_NULL)
+	    {
+	      ofc_thread_set_variable (OfcLastError, 
+				       (OFC_DWORD_PTR) OFC_ERROR_BROKEN_PIPE) ;
+	    }
+	  else
+	    {
+	      nBytes = OFC_MIN(nNumberOfBytesToRead, data->len) ;
+	      ofc_memcpy (lpBuffer, data->buffer + data->offset, nBytes) ;
+	      if (lpNumberOfBytesRead != OFC_NULL)
+		*lpNumberOfBytesRead = nBytes ;
+	      data->len -= nBytes ;
+	      data->offset += nBytes ;
+	      if (data->len == 0)
+		{
+		  ofc_waitq_dequeue(half->hWaitQ);
+		  ofc_free (data) ;
+		}
+	      ret = OFC_TRUE ;
+	    }
+	  ofc_handle_unlock (hFile) ;
 	}
-      ofc_handle_unlock (hFile) ;
       ofc_pipe_unlock() ;
     }
   return (ret) ;
@@ -372,6 +442,17 @@ static OFC_BOOL OfcFSPipeCloseHandle (OFC_HANDLE hFile)
       ofc_waitq_wake(half->hWaitQ);
       ofc_waitq_destroy(half->hWaitQ);
       half->hWaitQ = OFC_HANDLE_NULL;
+
+      for (OFC_HANDLE hOverlapped =
+	     (OFC_HANDLE) ofc_dequeue(half->overlapped_queue);
+	   hOverlapped != OFC_HANDLE_NULL;
+	   hOverlapped = (OFC_HANDLE) ofc_dequeue(half->overlapped_queue))
+	{
+	  OfcFSPipeDestroyOverlapped(hOverlapped);
+	}
+      ofc_queue_destroy(half->overlapped_queue);
+      half->overlapped_queue = OFC_HANDLE_NULL;
+      
       half->hPipe = OFC_HANDLE_NULL;
 
       if (half->sibling != OFC_NULL)
@@ -557,20 +638,54 @@ OFC_BOOL OfcFSPipeMoveFile (OFC_LPCTSTR lpExistingFileName,
   return (OFC_FALSE) ;
 }
 
+OFC_HANDLE OfcFSPipeGetOverlappedEvent(OFC_HANDLE hOverlapped)
+{
+  OFC_FSPIPE_OVERLAPPED *Overlapped;
+  OFC_HANDLE hRet;
+
+  hRet = OFC_HANDLE_NULL;
+  Overlapped = ofc_handle_lock(hOverlapped);
+  if (Overlapped != OFC_NULL) {
+    hRet = Overlapped->hEvent;
+    ofc_handle_unlock(hOverlapped);
+  }
+  return (hRet);
+}
+
 static OFC_HANDLE OfcFSPipeCreateOverlapped (OFC_VOID)
 {
-  ofc_thread_set_variable (OfcLastError, 
-			 (OFC_DWORD_PTR) OFC_ERROR_CALL_NOT_IMPLEMENTED) ;
+  OFC_FSPIPE_OVERLAPPED *Overlapped;
+  OFC_HANDLE hRet;
 
-  return (OFC_HANDLE_NULL) ;
+  hRet = OFC_HANDLE_NULL;
+
+  Overlapped = ofc_malloc(sizeof(OFC_FSPIPE_OVERLAPPED));
+  if (Overlapped != OFC_NULL)
+    {
+      Overlapped->hEvent = ofc_event_create(OFC_EVENT_MANUAL);
+      hRet = ofc_handle_create(OFC_HANDLE_FSPIPE_OVERLAPPED,
+			       Overlapped);
+    }
+
+  return (hRet);
 }
 
 static OFC_VOID OfcFSPipeDestroyOverlapped (OFC_HANDLE hOverlapped)
 {
+  OFC_FSPIPE_OVERLAPPED *Overlapped;
+
+  Overlapped = ofc_handle_lock(hOverlapped);
+  if (Overlapped != OFC_NULL)
+    {
+      ofc_event_destroy(Overlapped->hEvent);
+      ofc_free(Overlapped);
+      ofc_handle_destroy(hOverlapped);
+      ofc_handle_unlock(hOverlapped);
+    }
 }
 
 static OFC_VOID OfcFSPipeSetOverlappedOffset (OFC_HANDLE hOverlapped,
-						OFC_OFFT offset)
+					      OFC_OFFT offset)
 {
 }
 
@@ -580,10 +695,45 @@ OFC_BOOL OfcFSPipeGetOverlappedResult (OFC_HANDLE hFile,
 					 lpNumberOfBytesTransferred,
 					 OFC_BOOL bWait) 
 {
-  ofc_thread_set_variable (OfcLastError, 
-			 (OFC_DWORD_PTR) OFC_ERROR_CALL_NOT_IMPLEMENTED) ;
+  OFC_FSPIPE_OVERLAPPED *Overlapped;
+  OFC_FS_PIPE_HALF *half ;
+  OFC_BOOL ret;
 
-  return (OFC_FALSE) ;
+  ret = OFC_FALSE;
+  half = ofc_handle_lock (hFile) ;
+
+  if (half == OFC_NULL)
+    {
+      ofc_thread_set_variable(OfcLastError,
+			      (OFC_DWORD_PTR) OFC_ERROR_ACCESS_DENIED);
+    }
+  else
+    {
+      Overlapped = ofc_handle_lock(hOverlapped);
+      if (Overlapped != OFC_NULL)
+	{
+	  if (bWait)
+	    ofc_event_wait(Overlapped->hEvent);
+
+	  if (ofc_event_test(Overlapped->hEvent))
+	    {
+	      ofc_assert(Overlapped->dwResult >= 0, "Negative Bytes");
+	      *lpNumberOfBytesTransferred = Overlapped->dwResult;
+	      ret = OFC_TRUE;
+	    }
+	  else
+	    {
+	      ofc_thread_set_variable (OfcLastError, 
+				       (OFC_DWORD_PTR) OFC_ERROR_IO_PENDING) ;
+	    }
+	  ofc_handle_unlock(hOverlapped);
+	}
+    }
+
+  if (half != OFC_NULL)
+    ofc_handle_unlock(hFile);
+
+  return (ret);
 }
 
 OFC_BOOL OfcFSPipeSetEndOfFile (OFC_HANDLE hFile) 
@@ -654,6 +804,7 @@ OfcFSPipeTransactNamedPipe (OFC_HANDLE hFile,
 
 	  ofc_waitq_enqueue(sibling->hWaitQ, data);
 
+	  ofc_waitq_reset(half->hWaitQ);
 	  for (data = ofc_waitq_dequeue (half->hWaitQ) ;
 	       data == OFC_NULL ;
 	       data = ofc_waitq_dequeue (half->hWaitQ))

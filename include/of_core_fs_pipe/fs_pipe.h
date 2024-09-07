@@ -8,6 +8,7 @@
 
 #include "ofc/types.h"
 #include "ofc/file.h"
+#include "ofc/handle.h"
 
 /**
  * \defgroup BlueFSPipe Pipe File System Dependent Support
@@ -22,6 +23,7 @@ extern "C"
 #endif
   OFC_VOID OfcFSPipeStartup (OFC_VOID) ;
   OFC_VOID OfcFSPipeShutdown (OFC_VOID);
+  OFC_HANDLE OfcFSPipeGetOverlappedEvent(OFC_HANDLE hOverlapped);
 #if defined(__cplusplus)
 }
 #endif
