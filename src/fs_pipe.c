@@ -460,6 +460,22 @@ static OFC_BOOL OfcFSPipeCloseHandle (OFC_HANDLE hFile)
 	  sibling = half->sibling ;
 	  sibling->sibling = OFC_NULL ;
 	  ofc_waitq_wake(sibling->hWaitQ);
+
+	  for (OFC_HANDLE hOverlapped =
+		 (OFC_HANDLE) ofc_dequeue(sibling->overlapped_queue);
+	       hOverlapped != OFC_HANDLE_NULL;
+	       hOverlapped =
+		 (OFC_HANDLE) ofc_dequeue(sibling->overlapped_queue))
+	    {
+	      OFC_FSPIPE_OVERLAPPED *Overlapped;
+
+	      Overlapped = ofc_handle_lock(hOverlapped);
+	      if (Overlapped != OFC_NULL)
+		{
+		  Overlapped->dwResult = -1;
+		  ofc_event_set(Overlapped->hEvent);
+		}
+	    }
 	}
       else
 	{
@@ -717,9 +733,18 @@ OFC_BOOL OfcFSPipeGetOverlappedResult (OFC_HANDLE hFile,
 
 	  if (ofc_event_test(Overlapped->hEvent))
 	    {
-	      ofc_assert(Overlapped->dwResult >= 0, "Negative Bytes");
-	      *lpNumberOfBytesTransferred = Overlapped->dwResult;
-	      ret = OFC_TRUE;
+	      if (Overlapped->dwResult < 0)
+		{
+		  *lpNumberOfBytesTransferred = 0;
+		  ofc_thread_set_variable (OfcLastError, 
+					   (OFC_DWORD_PTR) OFC_ERROR_BROKEN_PIPE);
+		  ret = OFC_FALSE;
+		}
+	      else
+		{
+		  *lpNumberOfBytesTransferred = Overlapped->dwResult;
+		  ret = OFC_TRUE;
+		}
 	    }
 	  else
 	    {
