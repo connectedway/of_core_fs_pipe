@@ -99,6 +99,7 @@ static OFC_VOID service_overlapped_queue (OFC_FS_PIPE_HALF *half)
 	      ofc_free (data) ;
 	    }
 	  ofc_event_set(Overlapped->hEvent);
+	  ofc_handle_unlock(hOverlapped);
 	}
     }
 }
@@ -377,8 +378,8 @@ static OFC_BOOL OfcFSPipeReadFile (OFC_HANDLE hFile,
 	  ofc_enqueue (half->overlapped_queue, (OFC_VOID *) hOverlapped);
 	  ofc_thread_set_variable (OfcLastError, 
 				   (OFC_DWORD_PTR) OFC_ERROR_IO_PENDING) ;
-	  ofc_handle_unlock(hOverlapped);
 	  service_overlapped_queue(half);
+	  ofc_handle_unlock(hOverlapped);
 	}
       else
 	{
@@ -411,9 +412,9 @@ static OFC_BOOL OfcFSPipeReadFile (OFC_HANDLE hFile,
 		}
 	      ret = OFC_TRUE ;
 	    }
-	  ofc_handle_unlock (hFile) ;
 	}
       ofc_pipe_unlock() ;
+      ofc_handle_unlock (hFile) ;
     }
   return (ret) ;
 }
@@ -474,6 +475,7 @@ static OFC_BOOL OfcFSPipeCloseHandle (OFC_HANDLE hFile)
 		{
 		  Overlapped->dwResult = -1;
 		  ofc_event_set(Overlapped->hEvent);
+		  ofc_handle_unlock(hOverlapped);
 		}
 	    }
 	}
@@ -753,10 +755,9 @@ OFC_BOOL OfcFSPipeGetOverlappedResult (OFC_HANDLE hFile,
 	    }
 	  ofc_handle_unlock(hOverlapped);
 	}
+      ofc_handle_unlock(hFile);
     }
 
-  if (half != OFC_NULL)
-    ofc_handle_unlock(hFile);
 
   return (ret);
 }
